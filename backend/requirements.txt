@@ -5,4 +5,4 @@ gunicorn
 python-dotenv
 PyPDF2
 python-docx
-whop-sdk>=1.0.0
+whop-sdk
