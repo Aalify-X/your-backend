@@ -12,9 +12,10 @@
         // Only initialize widget if not in trial period
         if (!isTrialActive()) {
             window.whopWidget.initialize({
-                sellerId: "YOUR_SELLER_ID",
-                productId: "YOUR_PRODUCT_ID",
+                sellerId: "app_dyAJyqA7FjKF24",
+                productId: "prod_2bPcTPEWlcclz",
                 containerId: "whop-verification-container",
+                apikey:"dMG9tvJDh7Zbk-icI5B6vfiR-xIY3Ij5lhU7JSwv8sM" ,
                 onSuccess: function(data) {
                     verifyWithBackend(data.token);
                 },
