@@ -362,7 +362,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "Content-Type": "application/json",
-    "HTTP-Referer": "https://www.progrify.pro",  # Update to match your domain
+    "HTTP-Referer": "https://www.your-webapp.onrender.com",  # Update to match your domain
     "X-Title": "Progrify PDF Summarizer"
 }
 
