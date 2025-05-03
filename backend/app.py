@@ -29,7 +29,7 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default-secret-key-12345')
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['PORT'] = int(os.getenv('PORT', 10000))
-app.config['TRIAL_END_DATE'] = os.getenv('TRIAL_END_DATE', '2023-12-31')  # Set your trial end date
+app.config['TRIAL_END_DATE'] = os.getenv('TRIAL_END_DATE', '2023-12-31')
 
 # CORS and session settings
 CORS(app, supports_credentials=True)
@@ -39,7 +39,26 @@ app.config.update(
     SESSION_COOKIE_SAMESITE='Lax'
 )
 
+# ================== HELPER CLASSES ==================
+
+class TimeoutException(Exception):
+    pass
+
 # ================== AUTH HELPERS ==================
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("Operation timed out")
+
+@contextmanager
+def timeout(seconds):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    except TimeoutException:
+        raise
+    finally:
+        signal.alarm(0)
 
 def is_coming_from_whop():
     """Check if request is coming from Whop"""
@@ -53,6 +72,25 @@ def is_in_trial_period():
         return datetime.now() < trial_end
     except:
         return False
+
+def verify_whop_token(token):
+    """Verify token with WHOP API"""
+    if not token.startswith('Bearer '):
+        token = f'Bearer {token}'
+    
+    try:
+        response = requests.get(
+            "https://api.whop.com/api/v2/me",
+            headers={"Authorization": token},
+            timeout=5
+        )
+        if response.status_code == 200:
+            session['whop_verified'] = True
+            session['whop_user'] = response.json()
+            return True
+    except requests.exceptions.RequestException:
+        pass
+    return False
 
 def whop_access_required(f):
     @wraps(f)
@@ -80,24 +118,6 @@ def whop_access_required(f):
             
         return redirect(url_for('verify'))
     return decorated_function
-
-def verify_whop_token(token):
-    if not token.startswith('Bearer '):
-        token = f'Bearer {token}'
-    
-    try:
-        response = requests.get(
-            "https://api.whop.com/api/v2/me",
-            headers={"Authorization": token},
-            timeout=5
-        )
-        if response.status_code == 200:
-            session['whop_verified'] = True
-            session['whop_user'] = response.json()
-            return True
-    except requests.exceptions.RequestException:
-        pass
-    return False
 
 # ================== ROUTES ==================
 
@@ -138,34 +158,32 @@ def logout():
     session.clear()
     return redirect(url_for('verify'))
 
-# [Keep all your existing protected routes and helper functions...]
-
 # ================== PROTECTED FEATURES ==================
 
 @app.route('/digitalplanner')
-@whop_required
+@whop_access_required
 def digital_planner():
     return render_template('digital_planner.html')
 
 @app.route('/whiteboard')
-@whop_required
+@whop_access_required
 def whiteboard():
     return render_template('whiteboard.html')
 
 @app.route('/flashcards')
-@whop_required
+@whop_access_required
 def flashcards():
     return render_template('flashcards.html')
 
 @app.route('/pdf_tools')
-@whop_required
+@whop_access_required
 def pdf_tools():
     return render_template('pdf_document_intelligence.html')
 
 # ================== DOCUMENT PROCESSING ==================
 
 @app.route('/api/process_document', methods=['POST'])
-@whop_required
+@whop_access_required
 def process_document():
     try:
         if 'file' not in request.files:
@@ -228,7 +246,7 @@ def process_document():
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-# ================== HELPER FUNCTIONS ==================
+# ================== UTILITY FUNCTIONS ==================
 
 def extract_text_from_pdf(file):
     try:
@@ -352,4 +370,3 @@ def generate_questions(text):
 if __name__ == '__main__':
     port = app.config['PORT']
     app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_ENV') == 'development')
-
