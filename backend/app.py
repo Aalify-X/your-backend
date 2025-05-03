@@ -44,119 +44,114 @@ app.config.update(
 # Set the port for Render
 app.config['PORT'] = int(os.getenv('PORT', 5000))
 
-# Whop token verification decorator
-def whop_token_required(f):
+# ================== WHOP AUTHENTICATION ==================
+
+def whop_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Skip token verification in development
+        # Skip verification in development
         if os.getenv('FLASK_ENV') == 'development':
             return f(*args, **kwargs)
             
+        # Check if already verified in session
+        if 'whop_verified' in session:
+            return f(*args, **kwargs)
+            
+        # Check for token in Authorization header
         token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({"error": "Authorization token missing"}), 401
-            
-        # Verify token with Whop API
-        try:
-            whop_response = requests.get(
-                "https://api.whop.com/api/v2/me",
-                headers={"Authorization": f"Bearer {token}"}
-            )
-            
-            if whop_response.status_code != 200:
-                return jsonify({"error": "Invalid Whop token"}), 401
+        if token:
+            try:
+                if verify_whop_token(token):
+                    return f(*args, **kwargs)
+            except Exception:
+                pass
                 
-            # Store user data in session if needed
-            user_data = whop_response.json()
-            session['whop_user'] = user_data
-            
-        except requests.exceptions.RequestException:
-            return jsonify({"error": "Failed to verify Whop token"}), 500
-            
-        return f(*args, **kwargs)
+        # Not verified - redirect to verification
+        return redirect(url_for('whop_verification'))
+        
     return decorated_function
 
-# Email required decorator
-def email_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'email' not in session:
-            return redirect(url_for('whop'))
-        return f(*args, **kwargs)
-    return decorated_function
+def verify_whop_token(token):
+    """Verify WHOP token with their API"""
+    if not token.startswith('Bearer '):
+        token = f'Bearer {token}'
+    
+    response = requests.get(
+        "https://api.whop.com/api/v2/me",
+        headers={"Authorization": token}
+    )
+    
+    if response.status_code == 200:
+        session['whop_verified'] = True
+        session['whop_user'] = response.json()
+        return True
+    return False
 
-# Routes
+# ================== ROUTES ==================
+
 @app.route('/')
-@app.route('/whop')
-def whop():
+def index():
+    if 'whop_verified' not in session:
+        return redirect(url_for('whop_verification'))
+    return render_template('index.html')
+
+@app.route('/verify')
+def whop_verification():
+    """WHOP verification page"""
     app.jinja_env.cache = {}
     return render_template('whop.html')
 
-
-@app.route('/index')
-@whop_token_required
-def index():
-    return render_template('index.html')
-
-@app.route('/save_email', methods=['POST'])
-@whop_token_required
-def save_email():
-    email = request.form.get('email')
-    if email:
-        session['email'] = email
-        return redirect(url_for('index'))
-    return render_template('whop.html', error="Please enter a valid email.")
+@app.route('/api/verify_whop', methods=['POST'])
+def api_verify_whop():
+    """Endpoint for WHOP widget to verify token"""
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    
+    if not token:
+        return jsonify({'success': False, 'message': 'No token provided'}), 401
+    
+    try:
+        if verify_whop_token(token):
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'message': 'Invalid token'}), 401
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('whop'))
+    return redirect(url_for('whop_verification'))
+
+# ================== PROTECTED ROUTES ==================
+
+@app.route('/dashboard')
+@whop_required
+def dashboard():
+    return render_template('index.html')
 
 @app.route('/digitalplanner')
-@whop_token_required
-@email_required
+@whop_required
 def digital_planner():
     return render_template('digital_planner.html')
 
 @app.route('/whiteboard')
-@whop_token_required
-@email_required
+@whop_required
 def whiteboard():
     return render_template('whiteboard.html')
 
 @app.route('/flashcards')
-@whop_token_required
-@email_required
+@whop_required
 def flashcards():
     return render_template('flashcards.html')
 
 @app.route('/pdf_tools')
-@whop_token_required
-@email_required
+@whop_required
 def pdf_tools():
     return render_template('pdf_document_intelligence.html')
 
-class TimeoutException(Exception):
-    pass
+# ================== DOCUMENT PROCESSING ==================
 
-def timeout_handler(signum, frame):
-    raise TimeoutException("Operation timed out")
-
-@contextmanager
-def timeout(seconds):
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(seconds)
-    try:
-        yield
-    except TimeoutException:
-        raise
-    finally:
-        signal.alarm(0)
-
-# Document processing
 @app.route('/api/process_document', methods=['POST'])
-@whop_token_required
-@email_required
+@whop_required
 def process_document():
     try:
         if 'file' not in request.files:
@@ -179,18 +174,18 @@ def process_document():
             else:
                 return jsonify({"error": "Unsupported file type"}), 400
 
-            if not text or len(text.strip()) < 100:  # Check for meaningful text
+            if not text or len(text.strip()) < 100:
                 return jsonify({"error": "No readable text in file"}), 400
 
-            # Process text in smaller chunks to prevent timeouts
-            chunk_size = 5000  # Process 5000 characters at a time
+            # Process text in smaller chunks
+            chunk_size = 5000
             chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
             summaries = []
             questions = []
 
             for chunk in chunks:
                 try:
-                    with timeout(15):  # 15 second timeout per chunk
+                    with timeout(15):
                         summary = generate_summary(chunk)
                         if summary:
                             summaries.append(summary)
@@ -199,10 +194,8 @@ def process_document():
                         if chunk_questions:
                             questions.extend(chunk_questions)
                 except TimeoutException:
-                    print("Processing chunk timed out")
                     continue
                 except Exception as e:
-                    print(f"Error processing chunk: {str(e)}")
                     continue
 
             final_summary = " ".join(summaries).strip()
@@ -214,160 +207,15 @@ def process_document():
             })
 
         except Exception as e:
-            print(f"Processing error: {str(e)}")
             return jsonify({"error": f"Failed to process document: {str(e)}"}), 500
 
     except ValueError as e:
-        print(f"Value error: {str(e)}")
         return jsonify({"error": "Invalid input parameters"}), 400
     except Exception as e:
-        print(f"API error: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-# Helper functions
-def extract_text_from_pdf(file):
-    try:
-        # Try to read the file directly
-        try:
-            pdf_reader = PdfReader(file)
-        except Exception:
-            # If that fails, try reading as bytes
-            pdf_reader = PdfReader(BytesIO(file.read()))
+# [Keep all your existing helper functions...]
 
-        text = ""
-        # Process pages in smaller batches
-        page_count = len(pdf_reader.pages)
-        batch_size = 5
-        
-        for batch_start in range(0, page_count, batch_size):
-            batch_end = min(batch_start + batch_size, page_count)
-            
-            for page_num in range(batch_start, batch_end):
-                try:
-                    page_text = pdf_reader.pages[page_num].extract_text()
-                    if page_text:
-                        text += page_text.strip() + "\n"
-                except Exception as e:
-                    print(f"Error extracting text from page {page_num}: {str(e)}")
-                    continue
-
-        if not text.strip():
-            return "No readable text found in PDF"
-        return text.strip()
-        
-    except Exception as e:
-        print(f"PDF extraction error: {str(e)}")
-        raise
-
-def extract_text_from_word(file):
-    try:
-        with timeout(30):  # 30 second timeout for Word processing
-            doc = Document(io.BytesIO(file.read()))
-            text = "\n".join([para.text for para in doc.paragraphs])
-            if not text.strip():
-                return "No readable text found in Word document"
-            return text.strip()
-    except TimeoutException:
-        print("Word processing timed out")
-        raise Exception("Word processing took too long")
-    except Exception as e:
-        print(f"Word extraction error: {str(e)}")
-        raise
-
-def query_openrouter(prompt):
-    try:
-        if not OPENROUTER_API_KEY:
-            raise ValueError("OpenRouter API key is not set")
-
-        data = {
-            "model": "anthropic/claude-3-sonnet-20240229",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 1000
-        }
-
-        response = requests.post(
-            OPENROUTER_URL,
-            headers=OPENROUTER_HEADERS,
-            json=data,
-            timeout=30
-        )
-
-        if response.status_code != 200:
-            error_msg = f"OpenRouter API error: {response.status_code}"
-            if response.text:
-                error_msg += f" - {response.text[:200]}"
-            raise Exception(error_msg)
-
-        result = response.json()
-        if 'choices' in result and len(result['choices']) > 0:
-            return result['choices'][0]['message']['content']
-        return None
-
-    except requests.exceptions.RequestException as e:
-        print(f"Network error: {str(e)}")
-        raise Exception(f"Network error: {str(e)}")
-    except ValueError as e:
-        print(f"Value error: {str(e)}")
-        raise Exception(f"Configuration error: {str(e)}")
-    except Exception as e:
-        print(f"API error: {str(e)}")
-        raise Exception(f"Failed to get response from OpenRouter: {str(e)}")
-
-def generate_summary(text):
-    try:
-        prompt = f"Write a concise summary of the following text:\n\n{text[:15000]}"
-        result = query_openrouter(prompt)
-        return result or "Failed to generate summary. Please try again."
-    except Exception as e:
-        print(f"Summary generation error: {str(e)}")
-        raise
-
-def generate_questions(text):
-    try:
-        prompt = f"""Generate important exam-style questions with answers based on the following text.\nFormat each as:\nQ: [question]\nA: [answer]\n\n{text[:15000]}"""
-        result = query_openrouter(prompt)
-        
-        if not result:
-            return [{"question": "Error generating questions", "answer": "Please try again"}]
-
-        questions = []
-        current_q = None
-        for line in result.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith('Q:'):
-                if current_q:
-                    questions.append(current_q)
-                q_text = line[2:].strip()
-                current_q = {"question": q_text, "answer": ""}
-            elif line.startswith('A:') and current_q:
-                current_q["answer"] = line[2:].strip()
-                questions.append(current_q)
-                current_q = None
-        if current_q:
-            questions.append(current_q)
-        return questions
-    except Exception as e:
-        print(f"Question generation error: {str(e)}")
-        raise
-
-# OpenRouter configuration
-OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-if not OPENROUTER_API_KEY:
-    raise ValueError("OpenRouter API key is not set in environment variables")
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_HEADERS = {
-    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "Content-Type": "application/json",
-    "HTTP-Referer": "https://www.your-webapp.onrender.com",  # Update to match your domain
-    "X-Title": "Progrify PDF Summarizer"
-}
-
-# Main
 if __name__ == '__main__':
     port = app.config['PORT']
-    app.run(host='0.0.0.0', port=port)
-
+    app.run(host='0.0.0.0', port=port, debug=True)
