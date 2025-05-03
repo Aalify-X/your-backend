@@ -8,7 +8,7 @@ import io
 from io import BytesIO
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
-from datetime import timedelta
+from datetime import datetime, timedelta
 import signal
 from contextlib import contextmanager
 from PyPDF2 import PdfReader
@@ -28,7 +28,8 @@ app = Flask(__name__,
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default-secret-key-12345')
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
-app.config['PORT'] = int(os.getenv('PORT', 10000))  # Render default port
+app.config['PORT'] = int(os.getenv('PORT', 10000))
+app.config['TRIAL_END_DATE'] = os.getenv('TRIAL_END_DATE', '2023-12-31')  # Set your trial end date
 
 # CORS and session settings
 CORS(app, supports_credentials=True)
@@ -40,32 +41,39 @@ app.config.update(
 
 # ================== AUTH HELPERS ==================
 
-class TimeoutException(Exception):
-    pass
+def is_coming_from_whop():
+    """Check if request is coming from Whop"""
+    referrer = request.headers.get('Referer', '')
+    return 'whop.com' in referrer or 'your-whop-page.whop.com' in referrer
 
-def timeout_handler(signum, frame):
-    raise TimeoutException("Operation timed out")
-
-@contextmanager
-def timeout(seconds):
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(seconds)
+def is_in_trial_period():
+    """Check if current date is within trial period"""
     try:
-        yield
-    except TimeoutException:
-        raise
-    finally:
-        signal.alarm(0)
+        trial_end = datetime.strptime(app.config['TRIAL_END_DATE'], '%Y-%m-%d')
+        return datetime.now() < trial_end
+    except:
+        return False
 
-def whop_required(f):
+def whop_access_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Allow in development
         if os.getenv('FLASK_ENV') == 'development':
             return f(*args, **kwargs)
             
+        # Block direct access
+        if not is_coming_from_whop():
+            return render_template('access_denied.html'), 403
+            
+        # Allow during trial period
+        if is_in_trial_period():
+            return f(*args, **kwargs)
+            
+        # Check for existing verification
         if 'whop_verified' in session:
             return f(*args, **kwargs)
             
+        # Check for token in headers
         token = request.headers.get('Authorization')
         if token and verify_whop_token(token):
             return f(*args, **kwargs)
@@ -94,23 +102,25 @@ def verify_whop_token(token):
 # ================== ROUTES ==================
 
 @app.route('/')
+@whop_access_required
 def home():
-    if 'whop_verified' in session:
-        return redirect(url_for('dashboard'))
-    return redirect(url_for('verify'))
+    if is_in_trial_period():
+        return render_template('trial_dashboard.html')
+    return render_template('paid_dashboard.html')
 
 @app.route('/verify')
 def verify():
+    """WHOP verification page (only shows after trial ends)"""
+    if is_in_trial_period():
+        return redirect(url_for('home'))
     app.jinja_env.cache = {}
-    return render_template('whop.html')
-
-@app.route('/dashboard')
-@whop_required
-def dashboard():
-    return render_template('index.html')
+    return render_template('whop_verification.html')
 
 @app.route('/api/verify_whop', methods=['POST'])
 def api_verify_whop():
+    if is_in_trial_period():
+        return jsonify({'status': 'trial_active'})
+        
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
     
     if not token:
@@ -119,7 +129,7 @@ def api_verify_whop():
     if verify_whop_token(token):
         return jsonify({
             'success': True,
-            'redirect': url_for('dashboard')
+            'redirect': url_for('home')
         })
     return jsonify({'success': False, 'message': 'Invalid token'}), 401
 
@@ -127,6 +137,8 @@ def api_verify_whop():
 def logout():
     session.clear()
     return redirect(url_for('verify'))
+
+# [Keep all your existing protected routes and helper functions...]
 
 # ================== PROTECTED FEATURES ==================
 
@@ -340,3 +352,4 @@ def generate_questions(text):
 if __name__ == '__main__':
     port = app.config['PORT']
     app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_ENV') == 'development')
+
