@@ -25,7 +25,7 @@ app = Flask(__name__,
             static_folder=STATIC_DIR)
 
 # App configuration
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default-secret-key-12345')
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'C424D6C928423849')
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['PORT'] = int(os.getenv('PORT', 10000))
@@ -63,7 +63,7 @@ def timeout(seconds):
 def is_coming_from_whop():
     """Check if request is coming from Whop"""
     referrer = request.headers.get('Referer', '')
-    return 'whop.com' in referrer or 'your-whop-page.whop.com' in referrer
+    return 'whop.com' in referrer or 'https://whop.com/progrify-pro' in referrer
 
 def is_in_trial_period():
     """Check if current date is within trial period"""
