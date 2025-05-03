@@ -1,42 +1,57 @@
-{% extends "base.html" %}
-
-{% block title %}Progrify Access{% endblock %}
-
-{% block additional_styles %}
-<style>
-    body {
-        font-family: Arial, sans-serif;
-        text-align: center;
-        padding: 50px;
-    }
-    #whop-widget {
-        width: 100%;
-        max-width: 400px;
-        margin: 30px auto;
-        min-height: 500px;
-    }
-</style>
-{% endblock %}
-
-{% block content %}
-<h1>Progrify Access Portal</h1>
-<div id="whop-widget"></div>
-{% endblock %}
-
-{% block scripts %}
-<script src="https://cdn.whop.com/js/embed.js"></script>
-<script>
-    window.whopWidget.initialize({
-        sellerId: "app_dyAJyqA7FjKF24",  // REPLACE WITH YOUR ACTUAL SELLER ID
-        productId: "prod_2bPcTPEWlcclz", // REPLACE WITH YOUR ACTUAL PRODUCT ID
-        containerId: "whop-widget",
-        onSuccess: function(data) {
-            localStorage.setItem("whop_token", data.token);
-            window.location.href = "/index";
-        },
-        onFailure: function(error) {
-            alert("Verification failed: " + error.message);
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Progrify Access</title>
+    <script src="https://cdn.whop.com/js/embed.js"></script>
+    <style>
+        #whop-container {
+            width: 100%;
+            max-width: 400px;
+            margin: 50px auto;
+            min-height: 500px;
         }
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="whop-container">
+        <div class="loading">Loading verification...</div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        window.whopWidget.initialize({
+            sellerId: "YOUR_ACTUAL_SELLER_ID",  // MUST REPLACE
+            productId: "YOUR_ACTUAL_PRODUCT_ID", // MUST REPLACE
+            containerId: "whop-container",
+            onSuccess: async function(data) {
+                try {
+                    const response = await fetch('/api/verify_whop', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${data.token}`,
+                            'Content-Type': 'application/json'
+                        },
+                        credentials: 'include'
+                    });
+                    
+                    if (response.ok) {
+                        window.location.href = "/";  // Redirect to main app
+                    } else {
+                        alert("Verification failed");
+                    }
+                } catch (error) {
+                    alert("Connection error");
+                }
+            },
+            onFailure: function(error) {
+                alert("Payment verification failed: " + error.message);
+            }
+        });
     });
-</script>
-{% endblock %}
+    </script>
+</body>
+</html>
