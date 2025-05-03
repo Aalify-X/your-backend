@@ -15,118 +15,120 @@ from PyPDF2 import PdfReader
 
 load_dotenv()
 
-# Get absolute paths to templates and static folders
+# Configure paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, '../frontend/templates')
 STATIC_DIR = os.path.join(BASE_DIR, '../frontend/static')
 
-app = Flask(__name__, 
-            template_folder=TEMPLATE_DIR, 
+app = Flask(__name__,
+            template_folder=TEMPLATE_DIR,
             static_folder=STATIC_DIR)
 
-# Use a fixed secret key for session persistence
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'NSjUyKL1$8N*@(i')
-
-# Configure session to be permanent
+# App configuration
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default-secret-key-12345')
 app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)  # Session lasts 30 days
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['PORT'] = int(os.getenv('PORT', 10000))  # Render default port
 
-# Configure CORS
+# CORS and session settings
 CORS(app, supports_credentials=True)
-
-# Set up session cookie settings
 app.config.update(
-    SESSION_COOKIE_SECURE=False,  # Allow HTTP in development
+    SESSION_COOKIE_SECURE=os.getenv('FLASK_ENV') == 'production',
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax'
 )
 
-# Set the port for Render
-app.config['PORT'] = int(os.getenv('PORT', 5000))
+# ================== AUTH HELPERS ==================
 
-# ================== WHOP AUTHENTICATION ==================
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("Operation timed out")
+
+@contextmanager
+def timeout(seconds):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    except TimeoutException:
+        raise
+    finally:
+        signal.alarm(0)
 
 def whop_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Skip verification in development
         if os.getenv('FLASK_ENV') == 'development':
             return f(*args, **kwargs)
             
-        # Check if already verified in session
         if 'whop_verified' in session:
             return f(*args, **kwargs)
             
-        # Check for token in Authorization header
         token = request.headers.get('Authorization')
-        if token:
-            try:
-                if verify_whop_token(token):
-                    return f(*args, **kwargs)
-            except Exception:
-                pass
-                
-        # Not verified - redirect to verification
-        return redirect(url_for('whop_verification'))
-        
+        if token and verify_whop_token(token):
+            return f(*args, **kwargs)
+            
+        return redirect(url_for('verify'))
     return decorated_function
 
 def verify_whop_token(token):
-    """Verify WHOP token with their API"""
     if not token.startswith('Bearer '):
         token = f'Bearer {token}'
     
-    response = requests.get(
-        "https://api.whop.com/api/v2/me",
-        headers={"Authorization": token}
-    )
-    
-    if response.status_code == 200:
-        session['whop_verified'] = True
-        session['whop_user'] = response.json()
-        return True
+    try:
+        response = requests.get(
+            "https://api.whop.com/api/v2/me",
+            headers={"Authorization": token},
+            timeout=5
+        )
+        if response.status_code == 200:
+            session['whop_verified'] = True
+            session['whop_user'] = response.json()
+            return True
+    except requests.exceptions.RequestException:
+        pass
     return False
 
 # ================== ROUTES ==================
 
 @app.route('/')
-def index():
-    if 'whop_verified' not in session:
-        return redirect(url_for('whop_verification'))
-    return render_template('index.html')
+def home():
+    if 'whop_verified' in session:
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('verify'))
 
 @app.route('/verify')
-def whop_verification():
-    """WHOP verification page"""
+def verify():
     app.jinja_env.cache = {}
     return render_template('whop.html')
-
-@app.route('/api/verify_whop', methods=['POST'])
-def api_verify_whop():
-    """Endpoint for WHOP widget to verify token"""
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    
-    if not token:
-        return jsonify({'success': False, 'message': 'No token provided'}), 401
-    
-    try:
-        if verify_whop_token(token):
-            return jsonify({'success': True})
-        return jsonify({'success': False, 'message': 'Invalid token'}), 401
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('whop_verification'))
-
-# ================== PROTECTED ROUTES ==================
 
 @app.route('/dashboard')
 @whop_required
 def dashboard():
     return render_template('index.html')
+
+@app.route('/api/verify_whop', methods=['POST'])
+def api_verify_whop():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    
+    if not token:
+        return jsonify({'success': False, 'message': 'No token provided'}), 401
+    
+    if verify_whop_token(token):
+        return jsonify({
+            'success': True,
+            'redirect': url_for('dashboard')
+        })
+    return jsonify({'success': False, 'message': 'Invalid token'}), 401
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('verify'))
+
+# ================== PROTECTED FEATURES ==================
 
 @app.route('/digitalplanner')
 @whop_required
@@ -177,7 +179,7 @@ def process_document():
             if not text or len(text.strip()) < 100:
                 return jsonify({"error": "No readable text in file"}), 400
 
-            # Process text in smaller chunks
+            # Process text in chunks
             chunk_size = 5000
             chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
             summaries = []
@@ -195,27 +197,146 @@ def process_document():
                             questions.extend(chunk_questions)
                 except TimeoutException:
                     continue
-                except Exception as e:
+                except Exception:
                     continue
 
             final_summary = " ".join(summaries).strip()
             
             return jsonify({
-                "summary": final_summary or "Failed to generate summary",
-                "questions": questions or ["Failed to generate questions"],
+                "summary": final_summary or "No summary generated",
+                "questions": questions or ["No questions generated"],
                 "status": "success"
             })
 
         except Exception as e:
             return jsonify({"error": f"Failed to process document: {str(e)}"}), 500
 
-    except ValueError as e:
+    except ValueError:
         return jsonify({"error": "Invalid input parameters"}), 400
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-# [Keep all your existing helper functions...]
+# ================== HELPER FUNCTIONS ==================
+
+def extract_text_from_pdf(file):
+    try:
+        try:
+            pdf_reader = PdfReader(file)
+        except Exception:
+            pdf_reader = PdfReader(BytesIO(file.read()))
+
+        text = ""
+        page_count = len(pdf_reader.pages)
+        batch_size = 5
+        
+        for batch_start in range(0, page_count, batch_size):
+            batch_end = min(batch_start + batch_size, page_count)
+            
+            for page_num in range(batch_start, batch_end):
+                try:
+                    page_text = pdf_reader.pages[page_num].extract_text()
+                    if page_text:
+                        text += page_text.strip() + "\n"
+                except Exception:
+                    continue
+
+        return text.strip() if text.strip() else "No readable text found in PDF"
+        
+    except Exception as e:
+        raise Exception(f"PDF extraction error: {str(e)}")
+
+def extract_text_from_word(file):
+    try:
+        with timeout(30):
+            doc = Document(io.BytesIO(file.read()))
+            text = "\n".join([para.text for para in doc.paragraphs])
+            return text.strip() if text.strip() else "No readable text found in Word document"
+    except TimeoutException:
+        raise Exception("Word processing timed out")
+    except Exception as e:
+        raise Exception(f"Word extraction error: {str(e)}")
+
+def query_openrouter(prompt):
+    try:
+        OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+        if not OPENROUTER_API_KEY:
+            raise ValueError("OpenRouter API key not set")
+
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://your-webapp.onrender.com",
+                "X-Title": "Progrify PDF Summarizer"
+            },
+            json={
+                "model": "anthropic/claude-3-sonnet-20240229",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+                "max_tokens": 1000
+            },
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            error_msg = f"OpenRouter API error: {response.status_code}"
+            if response.text:
+                error_msg += f" - {response.text[:200]}"
+            raise Exception(error_msg)
+
+        result = response.json()
+        if 'choices' in result and len(result['choices']) > 0:
+            return result['choices'][0]['message']['content']
+        return None
+
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Network error: {str(e)}")
+    except Exception as e:
+        raise Exception(f"API error: {str(e)}")
+
+def generate_summary(text):
+    try:
+        prompt = f"Write a concise summary of the following text:\n\n{text[:15000]}"
+        result = query_openrouter(prompt)
+        return result or "Failed to generate summary"
+    except Exception as e:
+        raise Exception(f"Summary generation error: {str(e)}")
+
+def generate_questions(text):
+    try:
+        prompt = f"""Generate exam-style questions with answers based on:
+        {text[:15000]}
+        Format each as: Q: [question]\nA: [answer]"""
+        
+        result = query_openrouter(prompt)
+        if not result:
+            return []
+            
+        questions = []
+        current_q = None
+        
+        for line in result.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('Q:'):
+                if current_q:
+                    questions.append(current_q)
+                current_q = {"question": line[2:].strip(), "answer": ""}
+            elif line.startswith('A:') and current_q:
+                current_q["answer"] = line[2:].strip()
+                questions.append(current_q)
+                current_q = None
+        
+        if current_q:
+            questions.append(current_q)
+            
+        return questions
+        
+    except Exception as e:
+        raise Exception(f"Question generation error: {str(e)}")
 
 if __name__ == '__main__':
     port = app.config['PORT']
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_ENV') == 'development')
