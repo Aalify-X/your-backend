@@ -187,7 +187,7 @@
             <a href="{{ url_for('index') }}" class="back-home-btn">🏠 Home</a>
             {% endif %}
             {% if session.get('user') %}
-            <a href="{{ url_for('auth.logout') }}">Logout</a>
+            <a href="{{ url_for('logout') }}">Logout</a>
             {% endif %}
 
         </div>
