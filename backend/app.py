@@ -1,6 +1,5 @@
 from flask import Flask, session, redirect, url_for, request, jsonify, render_template
 from flask_cors import CORS
-from auth.routes import auth_bp
 from functools import wraps
 import os
 from docx import Document
@@ -42,22 +41,10 @@ app.config.update(
 # Set the port for Render
 app.config['PORT'] = int(os.getenv('PORT', 10000))
 
-# Register the auth blueprint
-app.register_blueprint(auth_bp)
-
 # Error handling
 @app.errorhandler(500)
 def internal_server_error(e):
     return jsonify(error=str(e)), 500
-
-# Login required decorator
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('user'):
-            return redirect(url_for('auth_bp.login'))
-        return f(*args, **kwargs)
-    return decorated_function
 
 # Routes
 @app.route('/')
