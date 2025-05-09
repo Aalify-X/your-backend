@@ -1,5 +1,6 @@
 from flask import Flask, session, redirect, url_for, request, jsonify, render_template
 from flask_cors import CORS
+from auth.routes import auth_bp
 from functools import wraps
 import os
 from docx import Document
@@ -8,43 +9,80 @@ import io
 from io import BytesIO
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import timedelta
 import signal
 from contextlib import contextmanager
 from PyPDF2 import PdfReader
 
 load_dotenv()
 
-# Configure paths
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TEMPLATE_DIR = os.path.join(BASE_DIR, '../frontend/templates')
-STATIC_DIR = os.path.join(BASE_DIR, '../frontend/static')
+TEMPLATE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../frontend/templates'))
+STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../frontend/static'))
 
-app = Flask(__name__,
-            template_folder=TEMPLATE_DIR,
-            static_folder=STATIC_DIR)
+app = Flask(__name__, template_folder=TEMPLATE_DIR, static_folder=STATIC_DIR)
 
-# App configuration
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'C424D6C928423849')
+# Use a fixed secret key for session persistence
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'NSjUyKL1$8N*@(i')
+
+# Configure session to be permanent
 app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
-app.config['PORT'] = int(os.getenv('PORT', 10000))
-app.config['TRIAL_END_DATE'] = os.getenv('TRIAL_END_DATE', '2023-12-31')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)  # Session lasts 30 days
 
-# CORS and session settings
-CORS(app, supports_credentials=True)
+# Configure CORS
+CORS(app, origins=["https://your-frontend.onrender.com"],
+     supports_credentials=True)
+
+# Set up session cookie settings
 app.config.update(
-    SESSION_COOKIE_SECURE=os.getenv('FLASK_ENV') == 'production',
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax'
+    SESSION_COOKIE_SECURE=True,  # Only send cookie over HTTPS
+    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access to cookie
+    SESSION_COOKIE_SAMESITE='Lax'  # Allow cross-site requests
 )
 
-# ================== HELPER CLASSES ==================
+# Set the port for Render
+app.config['PORT'] = int(os.getenv('PORT', 10000))
+
+# Register the auth blueprint
+app.register_blueprint(auth_bp)
+
+# Error handling
+@app.errorhandler(500)
+def internal_server_error(e):
+    return jsonify(error=str(e)), 500
+
+# Login required decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('user'):
+            return redirect(url_for('auth.login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Routes
+@app.route('/')
+@app.route('/index')
+def index():
+    return render_template('index.html')
+
+@app.route('/digital_planner')
+def digital_planner():
+    return render_template('digital_planner.html')
+
+@app.route('/whiteboard')
+def whiteboard():
+    return render_template('whiteboard.html')
+
+@app.route('/flashcards')
+def flashcards():
+    return render_template('flashcards.html')
+
+@app.route('/pdf_tools')
+def pdf_tools():
+    return render_template('pdf_document_intelligence.html')
 
 class TimeoutException(Exception):
     pass
-
-# ================== AUTH HELPERS ==================
 
 def timeout_handler(signum, frame):
     raise TimeoutException("Operation timed out")
@@ -60,130 +98,8 @@ def timeout(seconds):
     finally:
         signal.alarm(0)
 
-def is_coming_from_whop():
-    """Check if request is coming from Whop"""
-    referrer = request.headers.get('Referer', '')
-    return 'whop.com' in referrer or 'https://whop.com/progrify-pro' in referrer
-
-def is_in_trial_period():
-    """Check if current date is within trial period"""
-    try:
-        trial_end = datetime.strptime(app.config['TRIAL_END_DATE'], '%Y-%m-%d')
-        return datetime.now() < trial_end
-    except:
-        return False
-
-def verify_whop_token(token):
-    """Verify token with WHOP API"""
-    if not token.startswith('Bearer '):
-        token = f'Bearer {token}'
-    
-    try:
-        response = requests.get(
-            "https://api.whop.com/api/v2/me",
-            headers={"Authorization": token},
-            timeout=5
-        )
-        if response.status_code == 200:
-            session['whop_verified'] = True
-            session['whop_user'] = response.json()
-            return True
-    except requests.exceptions.RequestException:
-        pass
-    return False
-
-def whop_access_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # Allow in development
-        if os.getenv('FLASK_ENV') == 'development':
-            return f(*args, **kwargs)
-            
-        # Block direct access
-        if not is_coming_from_whop():
-            return render_template('access_denied.html'), 403
-            
-        # Allow during trial period
-        if is_in_trial_period():
-            return f(*args, **kwargs)
-            
-        # Check for existing verification
-        if 'whop_verified' in session:
-            return f(*args, **kwargs)
-            
-        # Check for token in headers
-        token = request.headers.get('Authorization')
-        if token and verify_whop_token(token):
-            return f(*args, **kwargs)
-            
-        return redirect(url_for('verify'))
-    return decorated_function
-
-# ================== ROUTES ==================
-
-@app.route('/')
-@whop_access_required
-def home():
-    if is_in_trial_period():
-        return render_template('trial_dashboard.html')
-    return render_template('paid_dashboard.html')
-
-@app.route('/verify')
-def verify():
-    """WHOP verification page (only shows after trial ends)"""
-    if is_in_trial_period():
-        return redirect(url_for('home'))
-    app.jinja_env.cache = {}
-    return render_template('whop_verification.html')
-
-@app.route('/api/verify_whop', methods=['POST'])
-def api_verify_whop():
-    if is_in_trial_period():
-        return jsonify({'status': 'trial_active'})
-        
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    
-    if not token:
-        return jsonify({'success': False, 'message': 'No token provided'}), 401
-    
-    if verify_whop_token(token):
-        return jsonify({
-            'success': True,
-            'redirect': url_for('home')
-        })
-    return jsonify({'success': False, 'message': 'Invalid token'}), 401
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('verify'))
-
-# ================== PROTECTED FEATURES ==================
-
-@app.route('/digitalplanner')
-@whop_access_required
-def digital_planner():
-    return render_template('digital_planner.html')
-
-@app.route('/whiteboard')
-@whop_access_required
-def whiteboard():
-    return render_template('whiteboard.html')
-
-@app.route('/flashcards')
-@whop_access_required
-def flashcards():
-    return render_template('flashcards.html')
-
-@app.route('/pdf_tools')
-@whop_access_required
-def pdf_tools():
-    return render_template('pdf_document_intelligence.html')
-
-# ================== DOCUMENT PROCESSING ==================
-
+# Document processing
 @app.route('/api/process_document', methods=['POST'])
-@whop_access_required
 def process_document():
     try:
         if 'file' not in request.files:
@@ -206,18 +122,18 @@ def process_document():
             else:
                 return jsonify({"error": "Unsupported file type"}), 400
 
-            if not text or len(text.strip()) < 100:
+            if not text or len(text.strip()) < 100:  # Check for meaningful text
                 return jsonify({"error": "No readable text in file"}), 400
 
-            # Process text in chunks
-            chunk_size = 5000
+            # Process text in smaller chunks to prevent timeouts
+            chunk_size = 5000  # Process 5000 characters at a time
             chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
             summaries = []
             questions = []
 
             for chunk in chunks:
                 try:
-                    with timeout(15):
+                    with timeout(15):  # 15 second timeout per chunk
                         summary = generate_summary(chunk)
                         if summary:
                             summaries.append(summary)
@@ -226,36 +142,43 @@ def process_document():
                         if chunk_questions:
                             questions.extend(chunk_questions)
                 except TimeoutException:
+                    print("Processing chunk timed out")
                     continue
-                except Exception:
+                except Exception as e:
+                    print(f"Error processing chunk: {str(e)}")
                     continue
 
             final_summary = " ".join(summaries).strip()
             
             return jsonify({
-                "summary": final_summary or "No summary generated",
-                "questions": questions or ["No questions generated"],
+                "summary": final_summary or "Failed to generate summary",
+                "questions": questions or ["Failed to generate questions"],
                 "status": "success"
             })
 
         except Exception as e:
+            print(f"Processing error: {str(e)}")
             return jsonify({"error": f"Failed to process document: {str(e)}"}), 500
 
-    except ValueError:
+    except ValueError as e:
+        print(f"Value error: {str(e)}")
         return jsonify({"error": "Invalid input parameters"}), 400
     except Exception as e:
+        print(f"API error: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-# ================== UTILITY FUNCTIONS ==================
-
+# Helper functions
 def extract_text_from_pdf(file):
     try:
+        # Try to read the file directly
         try:
             pdf_reader = PdfReader(file)
         except Exception:
+            # If that fails, try reading as bytes
             pdf_reader = PdfReader(BytesIO(file.read()))
 
         text = ""
+        # Process pages in smaller batches
         page_count = len(pdf_reader.pages)
         batch_size = 5
         
@@ -267,45 +190,49 @@ def extract_text_from_pdf(file):
                     page_text = pdf_reader.pages[page_num].extract_text()
                     if page_text:
                         text += page_text.strip() + "\n"
-                except Exception:
+                except Exception as e:
+                    print(f"Error extracting text from page {page_num}: {str(e)}")
                     continue
 
-        return text.strip() if text.strip() else "No readable text found in PDF"
+        if not text.strip():
+            return "No readable text found in PDF"
+        return text.strip()
         
     except Exception as e:
-        raise Exception(f"PDF extraction error: {str(e)}")
+        print(f"PDF extraction error: {str(e)}")
+        raise
 
 def extract_text_from_word(file):
     try:
-        with timeout(30):
+        with timeout(30):  # 30 second timeout for Word processing
             doc = Document(io.BytesIO(file.read()))
             text = "\n".join([para.text for para in doc.paragraphs])
-            return text.strip() if text.strip() else "No readable text found in Word document"
+            if not text.strip():
+                return "No readable text found in Word document"
+            return text.strip()
     except TimeoutException:
-        raise Exception("Word processing timed out")
+        print("Word processing timed out")
+        raise Exception("Word processing took too long")
     except Exception as e:
-        raise Exception(f"Word extraction error: {str(e)}")
+        print(f"Word extraction error: {str(e)}")
+        raise
 
 def query_openrouter(prompt):
     try:
-        OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
         if not OPENROUTER_API_KEY:
-            raise ValueError("OpenRouter API key not set")
+            raise ValueError("OpenRouter API key is not set")
+
+        data = {
+            "model": "anthropic/claude-3-sonnet-20240229",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 1000
+        }
 
         response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://your-webapp.onrender.com",
-                "X-Title": "Progrify PDF Summarizer"
-            },
-            json={
-                "model": "anthropic/claude-3-sonnet-20240229",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 1000
-            },
+            OPENROUTER_URL,
+            headers=OPENROUTER_HEADERS,
+            json=data,
             timeout=30
         )
 
@@ -321,31 +248,34 @@ def query_openrouter(prompt):
         return None
 
     except requests.exceptions.RequestException as e:
+        print(f"Network error: {str(e)}")
         raise Exception(f"Network error: {str(e)}")
+    except ValueError as e:
+        print(f"Value error: {str(e)}")
+        raise Exception(f"Configuration error: {str(e)}")
     except Exception as e:
-        raise Exception(f"API error: {str(e)}")
+        print(f"API error: {str(e)}")
+        raise Exception(f"Failed to get response from OpenRouter: {str(e)}")
 
 def generate_summary(text):
     try:
         prompt = f"Write a concise summary of the following text:\n\n{text[:15000]}"
         result = query_openrouter(prompt)
-        return result or "Failed to generate summary"
+        return result or "Failed to generate summary. Please try again."
     except Exception as e:
-        raise Exception(f"Summary generation error: {str(e)}")
+        print(f"Summary generation error: {str(e)}")
+        raise
 
 def generate_questions(text):
     try:
-        prompt = f"""Generate exam-style questions with answers based on:
-        {text[:15000]}
-        Format each as: Q: [question]\nA: [answer]"""
-        
+        prompt = f"""Generate important exam-style questions with answers based on the following text.\nFormat each as:\nQ: [question]\nA: [answer]\n\n{text[:15000]}"""
         result = query_openrouter(prompt)
+        
         if not result:
-            return []
-            
+            return [{"question": "Error generating questions", "answer": "Please try again"}]
+
         questions = []
         current_q = None
-        
         for line in result.split('\n'):
             line = line.strip()
             if not line:
@@ -353,20 +283,33 @@ def generate_questions(text):
             if line.startswith('Q:'):
                 if current_q:
                     questions.append(current_q)
-                current_q = {"question": line[2:].strip(), "answer": ""}
+                q_text = line[2:].strip()
+                current_q = {"question": q_text, "answer": ""}
             elif line.startswith('A:') and current_q:
                 current_q["answer"] = line[2:].strip()
                 questions.append(current_q)
                 current_q = None
-        
         if current_q:
             questions.append(current_q)
-            
         return questions
-        
     except Exception as e:
-        raise Exception(f"Question generation error: {str(e)}")
+        print(f"Question generation error: {str(e)}")
+        raise
 
+# OpenRouter configuration
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+if not OPENROUTER_API_KEY:
+    raise ValueError("OpenRouter API key is not set in environment variables")
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://www.progrify.pro",  # Update to match your domain
+    "X-Title": "Progrify PDF Summarizer"
+}
+
+# Main
 if __name__ == '__main__':
     port = app.config['PORT']
-    app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_ENV') == 'development')
+    app.run(host='0.0.0.0', port=port)
