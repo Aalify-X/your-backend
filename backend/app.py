@@ -1,6 +1,5 @@
 from flask import Flask, session, redirect, url_for, request, jsonify, render_template
 from flask_cors import CORS
-from functools import wraps
 import os
 from docx import Document
 import requests
@@ -40,6 +39,8 @@ app.config.update(
 
 # Set the port for Render
 app.config['PORT'] = int(os.getenv('PORT', 10000))
+
+
 
 # Error handling
 @app.errorhandler(500)
